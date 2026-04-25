@@ -1,0 +1,197 @@
+# =============================================================================
+# Reusable workflow: Auto-release after a Dependabot merge
+# =============================================================================
+# Fires on push-to-main when the merge commit comes from Dependabot. Bumps
+# the package version (alpha/beta/rc suffix → next prerelease; stable →
+# patch), commits the bump to main, tags, and creates a GitHub Release.
+# The release event then triggers each repo's existing publish workflow.
+#
+# **Library repos only.** Don't call this from app / CDK / MCP repos —
+# those don't publish to a registry.
+#
+# Calling repo example:
+#
+#   name: Auto-release on Dependabot merge
+#   on:
+#     push:
+#       branches: [main]
+#   permissions:
+#     contents: write
+#   jobs:
+#     release:
+#       if: |
+#         github.event.head_commit.author.username == 'dependabot[bot]' ||
+#         contains(github.event.head_commit.message, 'dependabot[bot]')
+#       uses: de-otio/.github/.github/workflows/dependabot-release-on-bump.yml@main
+# =============================================================================
+
+name: Dependabot release-on-bump (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      version-strategy:
+        description: |
+          'auto' picks prerelease bump for alpha/beta/rc, patch otherwise.
+          'patch' always bumps patch. 'prerelease' always bumps the suffix.
+        type: string
+        default: auto
+      release-prefix:
+        description: Tag prefix (default 'v', set to '' for unprefixed)
+        type: string
+        default: v
+      mark-prerelease:
+        description: Mark the GitHub Release as prerelease for alpha/beta/rc
+        type: boolean
+        default: true
+    outputs:
+      released-version:
+        description: Version that was tagged and released
+        value: ${{ jobs.release.outputs.version }}
+      release-url:
+        description: URL of the created GitHub release
+        value: ${{ jobs.release.outputs.url }}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      url: ${{ steps.release.outputs.url }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Verify package.json exists
+        id: check
+        run: |
+          if [ ! -f package.json ]; then
+            echo "No package.json — nothing to release" >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Skip if there's no publishConfig and no publish workflow
+          if ! node -e "require('./package.json').publishConfig" 2>/dev/null \
+             && [ ! -f .github/workflows/publish.yml ]; then
+            echo "No publishConfig or publish.yml — repo is not a publishable library" >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        if: steps.check.outputs.skip != 'true'
+        id: bump
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          STRATEGY="${{ inputs.version-strategy }}"
+
+          if [ "$STRATEGY" = "auto" ]; then
+            if [[ "$CURRENT" == *-alpha.* ]] || [[ "$CURRENT" == *-beta.* ]] \
+               || [[ "$CURRENT" == *-rc.* ]]; then
+              STRATEGY=prerelease
+            else
+              STRATEGY=patch
+            fi
+          fi
+
+          # npm version computes the next version without writing the tag/commit
+          NEW=$(npm version "$STRATEGY" --no-git-tag-version --preid="$(echo "$CURRENT" | sed -nE 's/.*-(alpha|beta|rc)\..*/\1/p')")
+          # npm prepends 'v'; strip it for the version string
+          NEW="${NEW#v}"
+
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ inputs.release-prefix }}$NEW" >> "$GITHUB_OUTPUT"
+
+          # Detect prerelease for marking the GH release
+          if [[ "$NEW" == *-* ]]; then
+            echo "is-prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is-prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Bumping $CURRENT → $NEW (strategy: $STRATEGY)"
+
+      - name: Update lockfile to match new version
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # npm version --no-git-tag-version already updated package.json;
+          # also sync package-lock.json
+          npm install --package-lock-only --no-audit --no-fund
+
+      - name: Commit version bump
+        if: steps.check.outputs.skip != 'true'
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): $NEW_VERSION [skip ci]"
+          git push origin HEAD:main
+
+      - name: Tag the release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          git tag -a "$TAG" -m "$TAG (auto-release after Dependabot merge)"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          NEW: ${{ steps.bump.outputs.version }}
+          PREV: ${{ steps.bump.outputs.current }}
+          MARK_PRERELEASE: ${{ steps.bump.outputs.is-prerelease }}
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "$MARK_PRERELEASE" = "true" ] && [ "${{ inputs.mark-prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Compose release notes from commits between previous tag and HEAD
+          PREV_TAG="${{ inputs.release-prefix }}$PREV"
+          if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            COMMITS=$(git log "$PREV_TAG..HEAD" --pretty='format:- %s' --no-merges)
+          else
+            COMMITS=$(git log -10 --pretty='format:- %s' --no-merges)
+          fi
+
+          BODY=$(cat <<EOF
+          Auto-release triggered by Dependabot merge.
+
+          ## Changes since $PREV
+          $COMMITS
+
+          ---
+          *This release was created automatically. The Dependabot PR was reviewed
+          for supply-chain attack signals by Claude before merging — see the
+          merged PR for the verdict.*
+          EOF
+          )
+
+          URL=$(gh release create "$TAG" \
+            --title "$TAG (auto)" \
+            --notes "$BODY" \
+            $PRERELEASE_FLAG)
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Release created: $URL"
