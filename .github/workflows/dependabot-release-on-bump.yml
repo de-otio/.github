@@ -133,6 +133,23 @@ jobs:
           # also sync package-lock.json
           npm install --package-lock-only --no-audit --no-fund
 
+      - name: Sanity-check: install + build + test
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          npm ci
+          if npm run | grep -q "^  build$"; then npm run build; fi
+          if npm run | grep -q "^  test:all$"; then
+            npm run test:all
+          elif npm run | grep -q "^  test$"; then
+            npm test
+          fi
+        env:
+          # Surface failures clearly — if tests fail here, no tag is created
+          # and no release is published. The Dependabot merge to main stays
+          # in place; a human can investigate why CI passed on the PR but
+          # tests now fail post-merge (rare but possible: e.g. flaky test).
+          CI: true
+
       - name: Commit version bump
         if: steps.check.outputs.skip != 'true'
         env:
