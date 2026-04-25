@@ -140,6 +140,10 @@ jobs:
           use_bedrock: true
           aws_region: ${{ inputs.bedrock-region }}
           claude_args: "--model ${{ inputs.claude-model }} --max-turns ${{ inputs.max-turns }}"
+          # The PR was opened by dependabot[bot]; allow the action to run.
+          # Our prompt is hardcoded below — Dependabot does not control it.
+          allowed_bots: "dependabot[bot]"
+          track_progress: "true"
           prompt: |
             You are reviewing a Dependabot PR for **supply-chain attack
             signals**, not for API compatibility. Tests cover compatibility;
