@@ -133,7 +133,7 @@ jobs:
           # also sync package-lock.json
           npm install --package-lock-only --no-audit --no-fund
 
-      - name: Sanity-check: install + build + test
+      - name: "Sanity-check: install + build + test"
         if: steps.check.outputs.skip != 'true'
         run: |
           npm ci
