@@ -135,10 +135,17 @@ jobs:
           aws-region: ${{ inputs.bedrock-region }}
 
       - name: Claude supply-chain review
-        uses: anthropics/claude-code-action@c7c8889b30499b4e46f4c32b892e43cd364bc2fe # v1
+        uses: anthropics/claude-code-action@6c0083bb7289c31716797a039b6367b3079cc46e # v1.0.162
+        env:
+          # claude-code-action reads AWS_REGION from job/step env (see its action.yml,
+          # not from an input — there is no `aws_region` input (that was the bug: the
+          # old pin was passing an input the action doesn't accept). The preceding
+          # configure-aws-credentials step already exports AWS_REGION to $GITHUB_ENV
+          # by default (output-env-credentials defaults to true), so this is
+          # belt-and-suspenders — set explicitly so the dependency isn't implicit.
+          AWS_REGION: ${{ inputs.bedrock-region }}
         with:
           use_bedrock: true
-          aws_region: ${{ inputs.bedrock-region }}
           claude_args: "--model ${{ inputs.claude-model }} --max-turns ${{ inputs.max-turns }}"
           # The PR was opened by dependabot[bot]; allow the action to run.
           # Our prompt is hardcoded below — Dependabot does not control it.
