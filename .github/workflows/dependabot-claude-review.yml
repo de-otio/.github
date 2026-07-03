@@ -1,18 +1,30 @@
 # =============================================================================
-# Reusable workflow: Dependabot supply-chain review by Claude
+# Reusable workflow: Dependabot auto-merge (semver-based)
 # =============================================================================
-# Reviews each Dependabot PR for supply-chain attack signals (not just API
-# compatibility — that's what tests are for). Claude inspects the diff, the
-# upstream package metadata, install scripts, and release patterns. On verdict:
+# Auto-merges Dependabot PRs for semver-MINOR and semver-PATCH bumps once the
+# calling repo's required status checks are green. MAJOR bumps are always left
+# for a human — no automated review of any kind is attempted for them, so
+# there's nothing to fail or time out on that path.
 #
-#   - APPROVED + CI green: enable GitHub auto-merge
-#   - REJECTED:            label `claude-rejected` and `needs-human-review`
-#   - HUMAN_REVIEW:        label `needs-human-review`
+# History: this workflow previously ran a per-PR supply-chain review via
+# anthropics/claude-code-action on AWS Bedrock (OIDC). That action's own
+# internal OIDC->app-token exchange started failing with a 401 ("Invalid OIDC
+# token") — unrelated to the Bedrock credentials, which succeeded fine — and
+# since the review step never completed, auto-merge never got enabled for ANY
+# consuming repo, including on routine, safe patch/minor bumps. Diagnosed via
+# de-otio/claude-stats, 2026-07-03.
 #
-# Major version bumps short-circuit to `needs-human-review` regardless of
-# Claude's opinion — humans should look at every major dep bump.
+# dot-ops had already reached the same conclusion independently
+# (docs/deploy-health.md, retired 2026-07-01): a per-PR claude-code-action
+# review is "too costly per PR for its value." This workflow now matches
+# dot-ops's own proven dependabot-automerge.yml pattern: plain semver-based
+# auto-merge, no AWS, no OIDC, no third-party model-invoking action. See the
+# "Threat model" section in this repo's README for the trade-off being made.
 #
-# Calling repo example:
+# A best-effort, non-blocking npm-signature check is kept (cheap, no external
+# service dependency) — it's advisory only and never blocks the merge.
+#
+# Calling repo example (unchanged — no caller needs to update anything):
 #
 #   name: Dependabot review
 #   on:
@@ -28,41 +40,45 @@
 #       uses: de-otio/.github/.github/workflows/dependabot-claude-review.yml@main
 # =============================================================================
 
-name: Dependabot Claude review (reusable)
+name: Dependabot auto-merge (reusable)
 
 on:
   workflow_call:
     inputs:
+      # The following four inputs are no longer used now that the Claude/
+      # Bedrock review step is gone. Kept (accepted, ignored) purely so any
+      # existing caller that explicitly passes them doesn't get an "unexpected
+      # input" error — removing an input from workflow_call is a breaking
+      # change for callers, adding one back is not.
       bedrock-role-arn:
-        description: AWS IAM role to assume for Bedrock access
+        description: "Unused — retained for caller backward-compatibility only, see workflow header"
         type: string
-        default: arn:aws:iam::284064533851:role/github-ci-bedrock
+        default: ""
       bedrock-region:
-        description: AWS region for Bedrock
+        description: "Unused — retained for caller backward-compatibility only, see workflow header"
         type: string
-        default: eu-central-1
+        default: ""
       claude-model:
-        description: Bedrock model ID for Claude
+        description: "Unused — retained for caller backward-compatibility only, see workflow header"
         type: string
-        default: eu.anthropic.claude-opus-4-6-20251101-v1:0
+        default: ""
+      max-turns:
+        description: "Unused — retained for caller backward-compatibility only, see workflow header"
+        type: string
+        default: ""
       automerge-method:
         description: Merge method for auto-merge (squash|merge|rebase)
         type: string
         default: squash
-      max-turns:
-        description: Maximum agent turns for Claude review
-        type: string
-        default: '15'
 
 permissions:
   contents: write
   pull-requests: write
-  id-token: write
 
 jobs:
-  review:
+  automerge:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Checkout PR head
@@ -73,42 +89,14 @@ jobs:
 
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # ──────────────────────────────────────────────────────────────────────
-      # Major bumps: short-circuit. Humans should look at every major bump.
-      # ──────────────────────────────────────────────────────────────────────
-      - name: Short-circuit on major version bump
-        if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          DEPS: ${{ steps.meta.outputs.dependency-names }}
-          PREV: ${{ steps.meta.outputs.previous-version }}
-          NEW: ${{ steps.meta.outputs.new-version }}
-        run: |
-          gh pr edit "$PR_URL" --add-label "needs-human-review,major-bump"
-          gh pr comment "$PR_URL" --body "## Major version bump — human review required
-
-          \`$DEPS\` is bumping from \`$PREV\` to \`$NEW\` (semver major).
-
-          Auto-merge is disabled for major bumps. A human should:
-          - Read the changelog / migration guide
-          - Verify breaking-change impact on this repo
-          - Run any manual smoke tests
-          - Approve and merge by hand"
-          echo "major-bump=true" >> "$GITHUB_OUTPUT"
-        id: short-circuit
-
-      - name: Stop here if major bump
-        if: steps.short-circuit.outputs.major-bump == 'true'
-        run: exit 0
-
-      # ──────────────────────────────────────────────────────────────────────
       # Provenance: npm audit signatures (best-effort, doesn't block).
       # Verifies sigstore/registry signatures on the new package version.
+      # Cheap, no external service dependency, kept from the prior version.
       # ──────────────────────────────────────────────────────────────────────
       - name: Setup Node (for npm audit signatures)
         if: steps.meta.outputs.package-ecosystem == 'npm_and_yarn'
@@ -126,140 +114,17 @@ jobs:
           cat /tmp/audit-signatures.txt
 
       # ──────────────────────────────────────────────────────────────────────
-      # Claude review: supply-chain attack analysis
+      # Semver-based auto-merge. Majors are intentionally left alone below —
+      # no label, no comment, no external call — they simply wait for a human
+      # to review and merge by hand.
       # ──────────────────────────────────────────────────────────────────────
-      - name: Configure AWS for Bedrock
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ inputs.bedrock-role-arn }}
-          aws-region: ${{ inputs.bedrock-region }}
-
-      - name: Claude supply-chain review
-        uses: anthropics/claude-code-action@6c0083bb7289c31716797a039b6367b3079cc46e # v1.0.162
-        env:
-          # claude-code-action reads AWS_REGION from job/step env (see its action.yml,
-          # not from an input — there is no `aws_region` input (that was the bug: the
-          # old pin was passing an input the action doesn't accept). The preceding
-          # configure-aws-credentials step already exports AWS_REGION to $GITHUB_ENV
-          # by default (output-env-credentials defaults to true), so this is
-          # belt-and-suspenders — set explicitly so the dependency isn't implicit.
-          AWS_REGION: ${{ inputs.bedrock-region }}
-        with:
-          use_bedrock: true
-          claude_args: "--model ${{ inputs.claude-model }} --max-turns ${{ inputs.max-turns }}"
-          # The PR was opened by dependabot[bot]; allow the action to run.
-          # Our prompt is hardcoded below — Dependabot does not control it.
-          allowed_bots: "dependabot[bot]"
-          track_progress: "true"
-          prompt: |
-            You are reviewing a Dependabot PR for **supply-chain attack
-            signals**, not for API compatibility. Tests cover compatibility;
-            you cover whether the upstream package itself is trustworthy.
-
-            **Update under review:**
-            - Package(s): ${{ steps.meta.outputs.dependency-names }}
-            - Ecosystem: ${{ steps.meta.outputs.package-ecosystem }}
-            - Bump: ${{ steps.meta.outputs.previous-version }} → ${{ steps.meta.outputs.new-version }}
-            - Update type: ${{ steps.meta.outputs.update-type }}
-            - Production / development: ${{ steps.meta.outputs.dependency-type }}
-
-            **What to look for (red flags):**
-            1. New install scripts (`scripts.preinstall`, `scripts.install`,
-               `scripts.postinstall`) that didn't exist in the old version,
-               especially ones that run `curl | sh`, write to `~/.ssh/`,
-               read env vars, or touch files outside the package dir.
-            2. New network-egress code (`http.request`, `fetch`, `dns.resolve`,
-               opening sockets) in a package that previously had none.
-            3. New `eval`, `Function(string)`, `vm.runInNewContext`,
-               obfuscated string concatenation, base64-decoded source, or
-               unicode homoglyph identifiers.
-            4. Maintainer/publisher change between the old and new version
-               (npm registry `_npmUser` field). A new publisher on a tiny
-               patch bump is suspicious.
-            5. Sudden expansion in package size or file count for a "patch"
-               version (e.g. 1.2.3 → 1.2.4 adding 50 files).
-            6. The new version lacks a corresponding upstream commit / tag /
-               release notes — npm has it but the source repo doesn't.
-            7. Typosquat: package name that's a near-miss of a popular package.
-            8. Deprecation: the package or its publisher is deprecated /
-               compromised per https://github.com/advisories or
-               https://socket.dev .
-            9. Discrepancy between the registry tarball contents and the
-               source repo at the corresponding tag (extra files in the
-               tarball that aren't in the repo).
-            10. Lockfile poisoning — a transitive dep gets bumped to a
-                version that doesn't satisfy any direct dep's range.
-
-            **What is NOT a red flag** (don't reject these):
-            - Routine patch bumps from the original maintainer
-            - New transitive deps that come from the upstream package's
-              own bumps
-            - License changes (note them but don't block)
-            - Bundle-size growth for a feature release
-
-            **Your tools:** the local checkout has the diff. Use bash + curl
-            to fetch upstream metadata: `curl https://registry.npmjs.org/<pkg>`
-            for npm; `gh api repos/<owner>/<repo>` for GitHub deps. Inspect
-            actual code in `node_modules/` after running `npm ci` if needed.
-
-            **Workflow:**
-            1. Investigate. Be thorough but bounded — don't burn 15 turns on
-               every routine bump.
-            2. Decide: APPROVE / REJECT / HUMAN_REVIEW.
-            3. Post a single PR comment via `gh pr comment` with your verdict
-               at the top of the comment, formatted exactly like:
-                 `**VERDICT: APPROVE**` / `**VERDICT: REJECT**` /
-                 `**VERDICT: HUMAN_REVIEW**`
-               Followed by a brief rationale (2–6 bullet points).
-            4. Add the matching label via `gh pr edit --add-label`:
-                 `claude-approved` / `claude-rejected` / `needs-human-review`.
-
-            Do not mark APPROVE if you have any genuine doubt. HUMAN_REVIEW is
-            the right answer when you're unsure — it's not a failure, it's
-            calibration. REJECT only when there's a clear malicious or
-            abandoned-package signal you can cite.
-
-            The PR URL is: ${{ github.event.pull_request.html_url }}
-            The repo is: ${{ github.repository }}
-            The PR number is: ${{ github.event.pull_request.number }}
-
-      # ──────────────────────────────────────────────────────────────────────
-      # Act on Claude's verdict (label-based)
-      # ──────────────────────────────────────────────────────────────────────
-      - name: Read Claude verdict from labels
-        id: verdict
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          LABELS=$(gh pr view "$PR_URL" --json labels --jq '.labels[].name')
-          echo "labels: $LABELS"
-          if echo "$LABELS" | grep -q "^claude-approved$"; then
-            echo "verdict=approved" >> "$GITHUB_OUTPUT"
-          elif echo "$LABELS" | grep -q "^claude-rejected$"; then
-            echo "verdict=rejected" >> "$GITHUB_OUTPUT"
-          else
-            echo "verdict=human" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Enable auto-merge (Claude approved)
-        if: steps.verdict.outputs.verdict == 'approved'
+      - name: Enable auto-merge for minor/patch bumps
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-minor' ||
+          steps.meta.outputs.update-type == 'version-update:semver-patch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           gh pr merge --auto --${{ inputs.automerge-method }} "$PR_URL"
           echo "Auto-merge enabled. GitHub will merge once required checks pass."
-
-      - name: Mark for human review (rejected)
-        if: steps.verdict.outputs.verdict == 'rejected'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          gh pr edit "$PR_URL" --add-label "needs-human-review"
-          echo "PR marked for human review (Claude rejected)."
-
-      - name: No-op for human-review verdict
-        if: steps.verdict.outputs.verdict == 'human'
-        run: echo "Claude requested human review. No auto-merge."

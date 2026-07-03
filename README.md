@@ -6,16 +6,23 @@ Shared, reusable GitHub Actions workflows for the de-otio organisation.
 
 ### `dependabot-claude-review.yml`
 
-Reviews each Dependabot PR for **supply-chain attack signals** (not API
-compatibility — that's what tests are for). Claude inspects the diff,
-the upstream package metadata, install scripts, and release patterns,
-then posts a verdict label:
+Auto-merges Dependabot PRs for **semver-minor / semver-patch** bumps once
+the calling repo's required status checks are green (a best-effort,
+non-blocking `npm audit signatures` check runs first for npm/yarn deps).
+**Semver-major bumps are always left for a human** — no automated review
+is attempted for them at all.
 
-- `claude-approved` → enables GitHub auto-merge (squash by default)
-- `claude-rejected` / `needs-human-review` → labelled, no auto-merge
-
-Major version bumps (`semver-major`) short-circuit to `needs-human-review`
-regardless of Claude's opinion.
+> **Changed 2026-07-03** (was: a per-PR Claude supply-chain review on AWS
+> Bedrock). That review step's `anthropics/claude-code-action` call
+> started failing its own internal OIDC token exchange (401, unrelated to
+> the Bedrock credentials), which silently blocked auto-merge for every
+> consuming repo — including routine, safe patch/minor bumps. dot-ops had
+> independently retired the same pattern for cost/value reasons
+> (`docs/deploy-health.md`, 2026-07-01: "too costly per PR for its
+> value"). This workflow now matches dot-ops's own
+> `dependabot-automerge.yml`: plain semver-based auto-merge, no AWS, no
+> OIDC, no third-party model-invoking action — see "Threat model" below
+> for the trade-off.
 
 **Calling repo:**
 
@@ -67,20 +74,25 @@ jobs:
 
 ## Threat model
 
-Auto-merging Dependabot patches is normally a tradeoff: low effort vs. the
-chance of merging a compromised dep. Claude's review tightens the bound
-materially — it actually inspects the upstream package each time, which
-no human at de-otio's scale would do. But it's not infallible:
+Auto-merging Dependabot patches is a tradeoff: low effort vs. the chance of
+merging a compromised dep. This workflow no longer runs a per-PR Claude
+supply-chain review (see the change note above) — the previous version's
+review step tightened that bound materially by actually inspecting the
+upstream package each time, but it depended on a third-party action's own
+OIDC auth path that broke and silently disabled auto-merge entirely for
+every consuming repo. A review layer that's usually down provides less
+real protection than a simpler layer that reliably runs, so the tradeoff
+was made explicitly in favor of reliability.
 
-- Claude can be fooled by sufficiently-stealthy malicious code.
-- The npm signature audit only attests *who* published, not *what* they
-  intended.
-- A maintainer takeover with carefully-crafted patch bumps may pass.
+What's left: required CI checks, branch protection on `main`, the
+existing security-review workflow on every PR, the npm audit-signatures
+step here (best-effort, attests *who* published, not *what* they
+intended), and — the one that still matters most — **major version bumps
+always wait for a human**, since that's where a maintainer takeover or a
+genuinely breaking change is most likely to land.
 
-Defences in depth: required CI checks, branch protection on `main`, the
-existing security-review workflow on every PR, and the npm audit step in
-the publish workflow. The Claude review is one layer, not the layer.
-
-For high-stakes repos (crypto, anything that touches user keys), prefer
-`needs-human-review` as the default and let Claude promote to
-`claude-approved` only on dead-routine bumps.
+For high-stakes repos (crypto, anything that touches user keys), don't
+rely on this workflow's default at all — require human review on every
+Dependabot PR regardless of semver bump size (skip calling this workflow,
+or add a repo-specific required-reviewers rule on the Dependabot branch
+pattern).
