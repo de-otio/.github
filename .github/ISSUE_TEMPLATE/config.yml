@@ -1,0 +1,15 @@
+# Org-default issue forms for de-otio.
+#
+# One rule governs every form in this directory: a form applies `needs-triage`
+# and nothing else. No form sets an authority label (`agent:go`,
+# `agent:review`, `human-only`) — those are a human judgement made after
+# reading the issue, and a form that pre-applies one is a form that lets an
+# issue author grant themselves authority.
+blank_issues_enabled: false
+contact_links:
+  - name: Process questions
+    url: https://github.com/de-otio/dot-work
+    about: How we work — the one-page process, onboarding, and the agent contract.
+  - name: Security concern
+    url: https://github.com/de-otio/dot-work/blob/main/process/byo-ai-policy.md
+    about: Anything involving customer or personal data and an agent. Stop and ask first.

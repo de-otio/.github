@@ -1,0 +1,46 @@
+name: Bug
+description: Something behaves differently from how it is specified or documented.
+labels: ["needs-triage"]
+body:
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: Observed behaviour. Exact error text if it is short; a path to the full log if it is not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+      description: And where that expectation comes from — a spec, a test, a doc, or an assumption. Say which.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The shortest sequence that reproduces it. If it is intermittent, say how often.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Package version, commit SHA, or deployed environment.
+    validations:
+      required: false
+
+  - type: textarea
+    id: gap
+    attributes:
+      label: What would have caught this?
+      description: >
+        Optional, and the most useful box on this form. If nothing deterministic
+        would have caught it, that gap is usually the more important issue.
+    validations:
+      required: false
