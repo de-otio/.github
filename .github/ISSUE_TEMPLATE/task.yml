@@ -1,0 +1,51 @@
+name: Task
+description: A unit of work small enough for one pull request.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue, one PR. If this needs more than one PR, it is an Epic —
+        file it in `dot-work` instead and open sub-issues here.
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: What is true after this is merged that is not true now? Write it as a state, not an activity.
+      placeholder: "`trellis-web` renders the empty-feed state instead of a blank panel."
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How would we know it was wrong?
+      description: >
+        The deterministic check that fails if this is implemented incorrectly.
+        A test that would pass against both the old and the new behaviour is
+        decoration, not verification. If the honest answer is "nothing
+        deterministic", say that — it is a finding, not a failure.
+      placeholder: "New test in `packages/web/test/feed.empty.test.ts`; fails today."
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and non-goals
+      description: What must not change. Interfaces to leave alone, files not to touch, scope explicitly excluded.
+    validations:
+      required: false
+
+  - type: input
+    id: spec
+    attributes:
+      label: Spec (if there is one)
+      description: >
+        Path to the merged spec, e.g. `doc/specs/web/empty-feed.md`. Specs are
+        files in the product repo, versioned with the code and reviewed by the
+        same gate — never issue bodies.
+      placeholder: doc/specs/<area>/<slug>.md
+    validations:
+      required: false

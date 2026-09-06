@@ -1,0 +1,51 @@
+name: Feature
+description: New capability. Expect a spec PR before an implementation PR.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Anything non-trivial goes through two PRs: a **spec PR** reviewed for
+        intent ("is this the right thing?"), then an **implementation PR**
+        reviewed for correctness against the merged spec. They are different
+        activities with different failure modes; reviewing both at once is how
+        they both get reviewed badly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: Who has it, how it shows up today, and what they do instead. Not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: Proposed shape
+      description: Enough that someone can disagree with it. A sketch is fine; a full design is not required here — that is the spec PR.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else was considered
+      description: Including doing nothing. If nothing else was considered, say so — that is honest and often fine.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: decision
+    attributes:
+      label: Does this need a recorded decision?
+      description: >
+        Decisions live in Curia, not in issues. If this changes a commitment or
+        a direction, it needs a Spike and a recorded decision, and this issue
+        tracks only the work that follows from it.
+      options:
+        - "No — this is within an existing decision"
+        - "Yes — a decision has to be recorded first"
+        - "Not sure"
+    validations:
+      required: true

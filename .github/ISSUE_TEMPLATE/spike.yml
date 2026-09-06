@@ -1,0 +1,45 @@
+name: Spike
+description: A question to answer, timeboxed. Closes when the decision is recorded.
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A Spike does not close when the investigation ends. It closes when the
+        **decision is recorded in Curia**. An answer that lives only in an issue
+        comment is an answer that will be re-litigated in four months.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: Phrased so that an answer would settle it. "Should we use X?" is usually too broad; "does X support Y under constraint Z?" is answerable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: blocked
+    attributes:
+      label: What is blocked on the answer
+      description: The work that cannot start, or that would be wasted if we guess wrong. If nothing is blocked, this may not be worth a spike yet.
+    validations:
+      required: true
+
+  - type: input
+    id: timebox
+    attributes:
+      label: Timebox
+      description: How long before we take the best available answer and move on.
+      placeholder: "1 day"
+    validations:
+      required: true
+
+  - type: textarea
+    id: disproof
+    attributes:
+      label: Cheapest disproof
+      description: >
+        The single fastest check that could kill the leading hypothesis. Do that
+        first. Most spikes overrun because the cheap disproof was run last.
+    validations:
+      required: false

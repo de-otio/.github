@@ -1,0 +1,29 @@
+name: Chore
+description: Maintenance with no user-visible change — upgrades, cleanups, tooling.
+labels: ["needs-triage"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs doing
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-now
+    attributes:
+      label: Why now
+      description: >
+        A deadline, a blocked piece of work, a cost, or an accumulating risk.
+        "It would be tidier" is a real reason but a weak one — say so if that is
+        the reason, so it can be prioritised honestly against work that is not.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: What could this break
+      description: And how we would find out. Chores break things precisely because nobody expects them to.
+    validations:
+      required: false
