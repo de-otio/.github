@@ -3,7 +3,7 @@
 # =============================================================================
 # Fires on push-to-main when the merge commit comes from Dependabot. Bumps
 # the package version (alpha/beta/rc suffix → next prerelease; stable →
-# patch), commits the bump to main, tags, and creates a GitHub Release.
+# patch), commits the bump, tags, and creates a GitHub Release.
 # The release event then triggers each repo's existing publish workflow.
 #
 # **Library repos only.** Don't call this from app / CDK / MCP repos —
@@ -23,6 +23,66 @@
 #         github.event.head_commit.author.username == 'dependabot[bot]' ||
 #         contains(github.event.head_commit.message, 'dependabot[bot]')
 #       uses: de-otio/.github/.github/workflows/dependabot-release-on-bump.yml@main
+#
+# -----------------------------------------------------------------------------
+# 2026-09-13 — two defects fixed together (dot-notes
+# github-native-orchestration/plan/session-handoff-2026-09-12.md, §2e and
+# "Still open" item 5). They had to be fixed together: the first one masked the
+# second, so fixing either alone changes nothing observable.
+#
+# 5a — THE SANITY-CHECK RAN A RECIPE THAT WAS NOT THE REPO'S. The step below
+#   used to hardcode `npm ci` → `npm run build` → `npm test`. On `de-otio/trellis`
+#   the real CI (`.github/workflows/ci.yml`) runs `npm ci` →
+#   `npm run prisma:generate` → `npm run build -w @de-otio/trellis`, and the
+#   root `build` script does no codegen. So this job's `tsc` compiled against an
+#   ungenerated Prisma client and died with
+#   `TS2305: Module '"@prisma/client"' has no exported member 'PrismaClient'`.
+#   Three runs died that way on 2026-09-12 (34674353867, 34674371242,
+#   34674398301) while trellis's own `main` CI was green (34677671716).
+#
+#   The general form of the bug is worse than the trellis instance: a post-merge
+#   re-verification that runs a DIFFERENT and WEAKER recipe than the CI it is
+#   re-verifying can only produce false failures or vacuous passes — on a repo
+#   with no `build` script the old recipe silently checked nothing at all.
+#   Hence `verify-command`: the caller states its own recipe, and the default
+#   is byte-for-byte the old sequence so no existing caller changes behaviour.
+#
+# 5b — THE RULESET WALL SAT FOUR STEPS BEHIND IT. After the sanity-check this
+#   workflow did `git push origin HEAD:main` and then `git push origin "$TAG"`
+#   as `github-actions[bot]`. `trellis` carries `d2a-minimal-pr-required` and
+#   `byo-full-public` (both `bypass_actors: []`) plus `d8-release-tags`, so both
+#   writes are refused — fixing 5a alone would only have moved the failure from
+#   `TS2305` to `GH013 Repository rule violations found`.
+#
+#   Hence `release-mode`. In `pull-request` mode the two writes are SPLIT:
+#     * the version bump is pushed to a SIDE BRANCH and handed over for a pull
+#       request — which is exactly what `d2a` exists to require, and the side
+#       branch is unaffected because both rulesets target `~DEFAULT_BRANCH`;
+#     * the tag is NOT created. `d8-release-tags` grants `OrganizationAdmin`
+#       bypass and the owner is an org admin, so cutting the tag from a
+#       terminal works today with no change to any ruleset. Automating it would
+#       mean handing a workflow the ability to create, move and delete release
+#       tags — the thing `d8` was created to stop.
+#
+#   OPENING the pull request is also left to a human, for now. GITHUB_TOKEN
+#   cannot do it: `can_approve_pull_request_reviews` is `false` at org level
+#   AND on trellis, and `default_workflow_permissions` is `read`, so it fails
+#   with "GitHub Actions is not permitted to create or approve pull requests"
+#   (measured 2026-09-12). The alternative is a GitHub App installation token
+#   (rule R3, scoped exchange — preferred over flipping the org-wide flag), and
+#   that is deliberately NOT in this change: as of 2026-09-13 the org's
+#   automation App holds `pull_requests: read`, trellis holds neither role-ARN
+#   secret the org's OIDC→SSM credential chain needs, and the chain's trust
+#   policy does not admit trellis. Merging the steps for it would put three
+#   unexercisable steps into the one workflow that cuts releases. When those
+#   prerequisites are met it becomes its own PR. Until then the job summary
+#   hands over a ready-to-run `gh pr create`.
+#
+#   NOT TAKEN: adding `github-actions` to `rulesets/bypass-allowlist.json`.
+#   That file is keyed per RULESET, not per workflow, so the entry would grant
+#   every workflow in all ten ruleset-carrying repos a direct push to `main`,
+#   and on `byo-full-public` it would additionally exempt `non_fast_forward`
+#   (i.e. permit a force-push of `main`).
 # =============================================================================
 
 name: Dependabot release-on-bump (reusable)
@@ -44,24 +104,97 @@ on:
         description: Mark the GitHub Release as prerelease for alpha/beta/rc
         type: boolean
         default: true
+      node-version:
+        description: |
+          Node major used for the verify step. DEFAULT 24 = today's value.
+          Set it to whatever the repo's own CI uses: verifying a bump on a
+          different Node than CI is the same class of mistake as verifying it
+          with a different build recipe (5a). trellis passes '22'.
+        type: string
+        default: '24'
+      verify-command:
+        description: |
+          Shell run after the version bump to prove the bumped tree still
+          builds. PASS THE REPO'S OWN CI RECIPE — see 5a in the header.
+
+          Runs under `bash -e` (NOT `-o pipefail`) from a temp file, because
+          the default below pipes `npm run` into `grep -q`: grep exits on the
+          first match and the resulting SIGPIPE on `npm run` would fail the
+          step under pipefail. If your recipe wants stricter shell options,
+          put `set -uo pipefail` at the top of your own string.
+
+          The default is the sequence this step hardcoded before 2026-09-13,
+          verbatim, so an existing caller that passes nothing is unchanged.
+
+          Note what a verify-command CANNOT do: service containers are declared
+          on the job, not injectable through an input, so no recipe passed here
+          can reach a live database, Redis, or dynamodb-local. A repo whose
+          tests need one must scope this string to the DB-free half of its CI
+          and let its own `on: push` CI run remain the gate on the rest.
+        type: string
+        default: |
+          npm ci
+          if npm run | grep -q "^  build$"; then npm run build; fi
+          if npm run | grep -q "^  test:all$"; then
+            npm run test:all
+          elif npm run | grep -q "^  test$"; then
+            npm test
+          fi
+      verify-timeout-minutes:
+        description: |
+          Cap on the verify step alone. The job cap is deliberately not the
+          only cap — a wedged test runner on the default 360-minute job ceiling
+          is real money on a private repo.
+        type: number
+        default: 10
+      release-mode:
+        description: |
+          'direct'       — today's behaviour: push the bump straight to the
+                           default branch, tag it, create the GitHub Release.
+                           Correct for a repo with no ruleset on `main`.
+          'pull-request' — push the bump to a side branch and stop, leaving the
+                           `gh pr create` and the tag to a human. No tag and no
+                           release are created. Correct for any repo whose
+                           default branch requires a pull request. See 5b.
+        type: string
+        default: direct
+      pr-branch-prefix:
+        description: Branch prefix used by release-mode 'pull-request'.
+        type: string
+        default: chore/release-
     outputs:
       released-version:
         description: Version that was tagged and released
         value: ${{ jobs.release.outputs.version }}
       release-url:
-        description: URL of the created GitHub release
+        description: URL of the created GitHub release (release-mode 'direct' only)
         value: ${{ jobs.release.outputs.url }}
+      bump-branch:
+        description: Branch the bump was pushed to (release-mode 'pull-request' only)
+        value: ${{ jobs.release.outputs.branch }}
 
+# `contents: write` is the whole requirement in both modes: 'direct' pushes to
+# the default branch and tags, 'pull-request' pushes a side branch. Nothing
+# here opens a pull request, so no `pull-requests` grant is needed, and nothing
+# exchanges an OIDC token, so no `id-token` grant is needed. Keep it this
+# narrow — a called workflow may not request more than its caller granted, and
+# all eight callers grant exactly this.
 permissions:
   contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised from 10 on 2026-09-13: a caller-supplied verify-command can be a
+    # real CI recipe (trellis's is npm ci + prisma generate + two tsc passes),
+    # which does not fit in ten minutes. The tight cap that matters is the
+    # step-level one on the verify step; this is the backstop, and it is still
+    # an order of magnitude under the 360-minute default.
+    timeout-minutes: 25
     outputs:
       version: ${{ steps.bump.outputs.version }}
       url: ${{ steps.release.outputs.url }}
+      branch: ${{ steps.branch.outputs.branch }}
 
     steps:
       - name: Checkout main
@@ -73,7 +206,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          node-version: ${{ inputs.node-version }}
 
       - name: Verify package.json exists
         id: check
@@ -91,6 +224,18 @@ jobs:
             exit 0
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release-mode
+        if: steps.check.outputs.skip != 'true'
+        env:
+          RELEASE_MODE: ${{ inputs.release-mode }}
+        run: |
+          # Reusable-workflow inputs have no enum type. A typo'd mode must not
+          # silently fall through to 'direct' and push to a protected main.
+          case "$RELEASE_MODE" in
+            direct|pull-request) ;;
+            *) echo "release-mode must be 'direct' or 'pull-request', got '$RELEASE_MODE'" >&2; exit 1 ;;
+          esac
 
       - name: Compute next version
         if: steps.check.outputs.skip != 'true'
@@ -116,6 +261,7 @@ jobs:
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "tag=${{ inputs.release-prefix }}$NEW" >> "$GITHUB_OUTPUT"
+          echo "branch=${{ inputs.pr-branch-prefix }}${{ inputs.release-prefix }}$NEW" >> "$GITHUB_OUTPUT"
 
           # Detect prerelease for marking the GH release
           if [[ "$NEW" == *-* ]]; then
@@ -133,25 +279,35 @@ jobs:
           # also sync package-lock.json
           npm install --package-lock-only --no-audit --no-fund
 
-      - name: "Sanity-check: install + build + test"
+      - name: "Sanity-check: run the caller's verify-command"
         if: steps.check.outputs.skip != 'true'
-        run: |
-          npm ci
-          if npm run | grep -q "^  build$"; then npm run build; fi
-          if npm run | grep -q "^  test:all$"; then
-            npm run test:all
-          elif npm run | grep -q "^  test$"; then
-            npm test
-          fi
+        timeout-minutes: ${{ inputs.verify-timeout-minutes }}
         env:
-          # Surface failures clearly — if tests fail here, no tag is created
-          # and no release is published. The Dependabot merge to main stays
-          # in place; a human can investigate why CI passed on the PR but
-          # tests now fail post-merge (rare but possible: e.g. flaky test).
+          # The recipe reaches the shell through the environment, never spliced
+          # into the script body. It comes from a workflow file in the calling
+          # repo (trusted), but an expression interpolated straight into a
+          # `run:` block is a habit that is wrong the first time the value comes
+          # from anywhere else.
+          VERIFY_COMMAND: ${{ inputs.verify-command }}
+          # Surface failures clearly — if the verify fails here, no branch, no
+          # tag and no release. The Dependabot merge stays in place; a human
+          # investigates why CI passed on the PR but the bumped tree does not
+          # build (see 5a: before 2026-09-13 the usual answer was "because this
+          # step was not running the repo's recipe").
           CI: true
+        run: |
+          printf '%s\n' "$VERIFY_COMMAND" > "$RUNNER_TEMP/verify.sh"
+          echo "--- verify-command ---"
+          cat "$RUNNER_TEMP/verify.sh"
+          echo "----------------------"
+          # `-e`, deliberately NOT `-o pipefail`. See the input's description.
+          bash -e "$RUNNER_TEMP/verify.sh"
 
-      - name: Commit version bump
-        if: steps.check.outputs.skip != 'true'
+      # -----------------------------------------------------------------------
+      # release-mode: direct — unchanged from before 2026-09-13.
+      # -----------------------------------------------------------------------
+      - name: Commit version bump (direct)
+        if: steps.check.outputs.skip != 'true' && inputs.release-mode == 'direct'
         env:
           NEW_VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -161,16 +317,16 @@ jobs:
           git commit -m "chore(release): $NEW_VERSION [skip ci]"
           git push origin HEAD:main
 
-      - name: Tag the release
-        if: steps.check.outputs.skip != 'true'
+      - name: Tag the release (direct)
+        if: steps.check.outputs.skip != 'true' && inputs.release-mode == 'direct'
         env:
           TAG: ${{ steps.bump.outputs.tag }}
         run: |
           git tag -a "$TAG" -m "$TAG (auto-release after Dependabot merge)"
           git push origin "$TAG"
 
-      - name: Create GitHub Release
-        if: steps.check.outputs.skip != 'true'
+      - name: Create GitHub Release (direct)
+        if: steps.check.outputs.skip != 'true' && inputs.release-mode == 'direct'
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -212,3 +368,93 @@ jobs:
 
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Release created: $URL"
+
+      # -----------------------------------------------------------------------
+      # release-mode: pull-request — the §2e split. Bump goes to a side branch;
+      # the pull request and the tag are both human actions.
+      # -----------------------------------------------------------------------
+      - name: Push version bump to a branch (pull-request)
+        if: steps.check.outputs.skip != 'true' && inputs.release-mode == 'pull-request'
+        id: branch
+        env:
+          NEW_VERSION: ${{ steps.bump.outputs.version }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+        run: |
+          # `d2a-minimal-pr-required` and `byo-full-public` both target
+          # `~DEFAULT_BRANCH`, so a side branch is not covered by either — this
+          # push succeeds with plain GITHUB_TOKEN contents:write and needs no
+          # bypass actor anywhere.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add package.json package-lock.json
+          git commit -m "chore(release): $NEW_VERSION"
+
+          # Fetch the branch FIRST if it already exists. `--force-with-lease`
+          # with no explicit expectation reads the remote-TRACKING ref, and
+          # `actions/checkout` fetches only the triggering ref — so on a
+          # re-run, where the branch exists on the remote but no tracking ref
+          # exists locally, the lease is rejected with `! [rejected] (stale
+          # info)` and the job dies for no real reason. Measured 2026-09-13:
+          # push to an ABSENT remote branch succeeds (it is a create, the lease
+          # is never consulted); a divergent push with no tracking ref is
+          # rejected; fetch-then-push forces cleanly. `|| true` because the
+          # first run legitimately has nothing to fetch.
+          git fetch origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
+
+          # --force-with-lease, not --force: a re-run of the same bump (a
+          # retried workflow, or a second Dependabot merge landing on the same
+          # version) must update the branch rather than fail, but must not
+          # clobber a branch someone else moved underneath us.
+          git push --force-with-lease origin "HEAD:refs/heads/$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise the human steps (pull-request)
+        if: steps.check.outputs.skip != 'true' && inputs.release-mode == 'pull-request'
+        env:
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          NEW: ${{ steps.bump.outputs.version }}
+          PREV: ${{ steps.bump.outputs.current }}
+          REPO: ${{ github.repository }}
+          # The workflow triggers on [main, master, dev] and this summary is
+          # handed to a human to paste. `main` is hardcoded three times in the
+          # `direct` path and is wrong for at least one caller
+          # (dot-finops-aws is on `master`) — do not copy that here: a
+          # handover command that names the wrong base is worse than no
+          # handover, because it looks authoritative.
+          BASE: ${{ github.event.repository.default_branch }}
+        # This summary IS the handover: the branch is pushed and everything a
+        # human needs is one paste away. A release chain that stops with a
+        # clear instruction is not a broken chain; one that dies on `GH013`
+        # four steps later is.
+        run: |
+          {
+            echo "## Release $PREV → $NEW is waiting on a human"
+            echo
+            echo "Branch pushed: \`$BRANCH\`"
+            echo
+            echo "### 1. Open the pull request"
+            echo
+            echo '```'
+            echo "gh pr create --repo $REPO --base $BASE --head $BRANCH \\"
+            echo "  --title 'chore(release): $NEW' \\"
+            echo "  --body 'Version bump after a Dependabot merge. Merging this does not publish — see step 2.'"
+            echo '```'
+            echo
+            echo "GitHub Actions cannot open it: \`can_approve_pull_request_reviews\`"
+            echo "is false org-wide and on this repo, so \`GITHUB_TOKEN\` fails with"
+            echo "\"GitHub Actions is not permitted to create or approve pull requests\"."
+            echo
+            echo "### 2. After it merges, cut the tag (this is what publishes)"
+            echo
+            echo '```'
+            echo "git fetch origin $BASE"
+            echo "git tag -a $TAG -m '$TAG' origin/$BASE"
+            echo "git push origin $TAG"
+            echo '```'
+            echo
+            echo "The tag is deliberately not automated: \`d8-release-tags\` grants"
+            echo "\`OrganizationAdmin\` bypass only, and the tag namespace is where"
+            echo "\`contents:write\` becomes release authority (finding S4)."
+          } >> "$GITHUB_STEP_SUMMARY"
