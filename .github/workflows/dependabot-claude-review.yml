@@ -7,7 +7,7 @@
 # there's nothing to fail or time out on that path.
 #
 # History: this workflow previously ran a per-PR supply-chain review via
-# anthropics/claude-code-action on AWS Bedrock (OIDC). That action's own
+# the vendor AI review action on AWS Bedrock (OIDC). That action's own
 # internal OIDC->app-token exchange started failing with a 401 ("Invalid OIDC
 # token") — unrelated to the Bedrock credentials, which succeeded fine — and
 # since the review step never completed, auto-merge never got enabled for ANY
@@ -15,7 +15,7 @@
 # de-otio/claude-stats, 2026-07-03.
 #
 # dot-ops had already reached the same conclusion independently
-# (docs/deploy-health.md, retired 2026-07-01): a per-PR claude-code-action
+# (docs/deploy-health.md, retired 2026-07-01): a per-PR vendor AI review action's
 # review is "too costly per PR for its value." This workflow now matches
 # dot-ops's own proven dependabot-automerge.yml pattern: plain semver-based
 # auto-merge, no AWS, no OIDC, no third-party model-invoking action. See the
