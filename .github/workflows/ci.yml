@@ -1,0 +1,93 @@
+name: CI
+
+# This repo is the org profile: issue-form templates and two reusable
+# (workflow_call-only) workflows consumed by other repos. There is no build,
+# no dependencies, and neither existing workflow here triggers on
+# pull_request, so nothing verified this repo's own YAML on a PR before now.
+# What CI is for here is the one failure mode that actually bites: a workflow
+# or issue-template file that no longer parses, discovered on the pull
+# request that broke it rather than the next time a caller repo tries to
+# invoke `dependabot-claude-review.yml` or `dependabot-release-on-bump.yml`.
+
+on:
+  pull_request:
+  # Also on direct pushes to main, so the gate guards the branch even for a
+  # change that lands without a pull request.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-yaml:
+    name: Validate YAML
+    runs-on: ubuntu-latest
+    # The default is 360 minutes (six hours). This job is seconds.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Parse every YAML file
+        run: |
+          set -euo pipefail
+          # Word-splitting the file list below is intentional: each path
+          # becomes its own argv entry for the python script.
+          # shellcheck disable=SC2046
+          python3 -c '
+          import sys, yaml
+          for f in sys.argv[1:]:
+              with open(f) as fh:
+                  yaml.safe_load(fh)
+              print(f"ok: {f}")
+          ' $(git ls-files '*.yml' '*.yaml')
+
+  # ===========================================================================
+  # The `ci-required` aggregating job — see dot-work's
+  # scripts/ci-required-template.yml for the six rules. In short: it keeps the
+  # repo's required-check list stable while the matrix above it changes,
+  # `if: always()` so it reports even when a need fails, and `success`/
+  # `skipped` pass while everything else fails closed.
+  #
+  # Do not rename this job, and do not put a `paths:` filter under `on:` in
+  # this workflow: a skipped WORKFLOW reports nothing and every pull request
+  # hangs forever.
+  # ===========================================================================
+  ci-required:
+    name: ci-required
+    if: always()
+    needs:
+      - validate-yaml
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify every CI job succeeded or was skipped
+        env:
+          RESULTS: >-
+            validate-yaml=${{ needs.validate-yaml.result }}
+        run: |
+          set -euo pipefail
+          echo "results: $RESULTS"
+          failed=0
+          for pair in $RESULTS; do
+            job="${pair%%=*}"
+            result="${pair#*=}"
+            case "$result" in
+              success|skipped)
+                echo "ok       $job: $result"
+                ;;
+              *)
+                echo "FAILED   $job: ${result:-<no result — is it still in this workflow?>}"
+                failed=1
+                ;;
+            esac
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo
+            echo "ci-required: at least one CI job did not succeed. Fail closed."
+            exit 1
+          fi
+          echo
+          echo "ci-required: all CI jobs succeeded or were skipped."
