@@ -1,0 +1,39 @@
+# CODEOWNERS for de-otio/.github — task D3.
+# Copied from dot-work/scripts/CODEOWNERS.template; only the repo-specific
+# block at the bottom differs per repo, on purpose.
+#
+# Three things that must not change:
+#   1. Catch-all first — CODEOWNERS is last-match-wins, so a later or absent
+#      catch-all leaves paths with no owner (finding S5).
+#   2. No `<slug>[bot]` anywhere — a bot is a different principal than its
+#      operator; a bot owner would let one human plus their own agent
+#      satisfy review.
+#   3. Owner is `@de-otio/founders`, which GitHub resolves in CODEOWNERS only
+#      if the team has explicit write access to this repo — the grant is
+#      the control, nothing asserts the owner resolves.
+#
+# Today this DEFINES ownership without REQUIRING review: rulesets keep
+# `require_code_owner_review: false` while the org has one filled seat (see
+# dot-work rulesets/README.md, "The N=1 policy").
+
+# --- catch-all: first rule, always ----------------------------------------
+*                       @de-otio/founders
+
+# --- agent control plane (finding S10) ------------------------------------
+/.mcp.json              @de-otio/founders
+/.claude/               @de-otio/founders
+/.devcontainer/         @de-otio/founders
+/.vscode/               @de-otio/founders
+/AGENTS.md              @de-otio/founders
+
+# --- CI and the gate plane ------------------------------------------------
+/.github/               @de-otio/founders
+
+# ===========================================================================
+# REPO-SPECIFIC BLOCK — de-otio/.github. Kept short: a path-scoped owner that
+# is always the same as the catch-all adds latency and no review.
+# Source: dot-work/scripts/CODEOWNERS.template (task D3).
+# ===========================================================================
+# No infrastructure, authentication, or migration directories exist in this
+# repo — it holds only the org profile (README.md, profile/README.md).
+# Nothing here warrants a path-scoped owner beyond the catch-all above.
