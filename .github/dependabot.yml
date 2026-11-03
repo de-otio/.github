@@ -1,0 +1,8 @@
+# Dependabot configuration (brakes rollout draft). Non-major bumps are labelled or merged
+# only through the org merge gate (.github/workflows/dependabot-gate.yml).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

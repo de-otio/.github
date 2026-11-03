@@ -1,0 +1,36 @@
+# Thin caller for the org's reusable Dependabot merge gate.
+# DRAFT (brakes rollout, decision D7). This repo calls its own reusable gate.
+# Needs the labels `needs-human-review` and `major-bump` to exist in this repo.
+name: Dependabot merge gate (this repo)
+
+on:
+  pull_request_target:
+    # `labeled` so a human adding `needs-human-review` turns auto-merge off.
+    types: [opened, reopened, synchronize, labeled]
+
+# Nothing by default; the job below asks for what the reusable workflow needs.
+permissions: {}
+
+# Per PR number, not github.ref (for pull_request_target, ref is the base branch).
+# A `labeled` event for any other label skips every job, so it gets its own group
+# (run id) and cannot cancel a pending `synchronize` run. No cancel-in-progress.
+# Keep this block in the CALLER only.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'needs-human-review') && github.run_id || 'gate' }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/dependabot-gate.yml
+    with:
+      ecosystems: github-actions
+      # This repo calls its own workflow by path, so the scripts come from the same
+      # commit the workflow runs from (the base-branch tip under pull_request_target).
+      scripts-ref: ${{ github.sha }}
+      enable-auto-merge: false
+      # PLACEHOLDER(merger-app): leave as is until the merger App design lands.
+      merge-identity: github-token

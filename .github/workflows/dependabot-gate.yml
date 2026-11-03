@@ -1,0 +1,338 @@
+# =============================================================================
+# Reusable workflow: Dependabot merge gate
+# =============================================================================
+# Generalised from de-otio/trellis `dependabot-auto-merge.yml` (commit 2a9304d).
+# Plan: dot-notes plans/pocock-brakes-and-dependabot-2026-11.md (W2 section 2,
+# decision D7). DRAFT: not merged, not applied to any repo yet.
+#
+# The gate (dependabot/scripts/dependabot-gate/evaluate.mjs, a pure function)
+# passes only when
+#   1. the PR author is dependabot[bot], every commit is authored by it AND
+#      committed by GitHub's web-flow identity with a `valid` signature, and the
+#      commit list is complete;
+#   2. `update-type` (dependabot/fetch-metadata) is patch or minor;
+#   3. changed paths are only the manifests and root lockfile of the enabled
+#      `ecosystems`, and workflow files whose every changed line only moves an
+#      action pin;
+#   4. required checks are green. NOT implemented here: GitHub's required checks
+#      decide when a merge may happen, and the merger decides when to merge;
+#   5. the PR does not carry `needs-human-review`;
+#   +  no supply-chain flag (npm only; dependabot/scripts/supply-chain/flags.mjs).
+# A failure of 1, 2, 3, 5 or a flag labels the PR `needs-human-review` (plus
+# `major-bump` for majors) and turns auto-merge off. A push to a Dependabot PR by
+# anyone other than Dependabot does the same without evaluating.
+#
+# WHO MERGES is not decided here. Default: nobody; this workflow only labels
+# (`enable-auto-merge: false`). Under the merger-App design the merge happens
+# in a central scheduled job in dot-work, which needs no per-repo credential
+# (dot-notes plans/pocock-brakes-w2-1b-merger-app.md, status: design). The
+# legacy mode `enable-auto-merge: true` enables GitHub auto-merge with
+# GITHUB_TOKEN, as trellis does today; in a repo whose ruleset requires a
+# code-owner review that merges nothing and only waits (the stall alarm exists
+# for that).
+#
+# PLACEHOLDER(merger-app): `merge-identity` is reserved so callers do not change
+# shape later. Only `github-token` is accepted today. Do not add a credential
+# input, secret or environment here until the merger-App design says what, if
+# anything, a per-repo job should hold.
+#
+# SAFETY (pull_request_target)
+# - The only checkout is de-otio/.github at `scripts-ref` (the gate's own
+#   scripts), never the PR head or the caller repo. PR content is read as DATA
+#   through the API (commits, files, patches, two lockfiles); nothing from the
+#   PR is installed or executed.
+# - PR-derived text reaches shell steps through `env:` only.
+# - The jobs that hold write permission (`flag`, `merge`) check out nothing and
+#   run no repository script.
+#
+# CALLER (copy; the caller grants the permissions, a called workflow cannot
+# raise them). The `concurrency` block belongs in the CALLER only: the same
+# group in both would deadlock.
+#
+#   name: Dependabot merge gate
+#   on:
+#     pull_request_target:
+#       types: [opened, reopened, synchronize, labeled]
+#   permissions: {}
+#   # GitHub keeps ONE pending run per group and a newer pending run cancels the
+#   # older one. A `labeled` event for any other label skips every job here, so it
+#   # gets its own group (run id): it can neither cancel a pending `synchronize`
+#   # run (whose decision would be lost) nor be cancelled by one.
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'needs-human-review') && github.run_id || 'gate' }}
+#     cancel-in-progress: false
+#   jobs:
+#     gate:
+#       if: github.event.pull_request.user.login == 'dependabot[bot]'
+#       permissions:
+#         contents: write
+#         pull-requests: write
+#       uses: de-otio/.github/.github/workflows/dependabot-gate.yml@<SHA>
+#       with:
+#         ecosystems: npm,github-actions
+#         scripts-ref: <SHA>   # the same 40-character SHA; the first step fails on anything else
+#
+# Owner prerequisites per repo: labels `needs-human-review` and `major-bump`
+# exist (this workflow has no `issues: write` and cannot create them).
+#
+# RUNNER: every job runs on `vars.CI_RUNNER` for PRIVATE repos only, and never for
+# a Dependabot branch (`dependabot/...` head ref), else ubuntu-latest. A public repo
+# (including a fork PR on one) can never reach the self-hosted runner, and a
+# Dependabot PR in a private repo never does either (decision D11). The runner
+# needs `gh`, `jq` and Node 22+.
+#
+# uv: a `uv.lock` change always fails the gate (`supply-chain: uv.lock
+# (uv-lockfile-unchecked)`), so the PR is labelled `needs-human-review`. There is no
+# uv supply-chain check yet; until one exists, uv bumps fail closed to a human.
+# =============================================================================
+
+name: Dependabot merge gate (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ecosystems:
+        description: >-
+          Comma-separated ecosystems rule 3 accepts: npm, uv, github-actions. A `uv.lock` change always needs a human (no uv supply-chain check yet).
+          Must match the package-ecosystem entries of the repo's dependabot.yml.
+          `npm` also turns on the supply-chain flag check (needs a root package-lock.json).
+        type: string
+        default: npm,github-actions
+      scripts-ref:
+        description: >-
+          REQUIRED. Full 40-character commit SHA of de-otio/.github the gate scripts are
+          checked out from; anything else fails the first step. Use the same SHA the workflow
+          itself is pinned to (`uses: ...@<SHA>`), so workflow and scripts move together.
+        type: string
+        required: true
+      enable-auto-merge:
+        description: >-
+          Legacy: after a pass, enable GitHub auto-merge (squash) with GITHUB_TOKEN.
+          Default false: the gate only labels.
+        type: boolean
+        default: false
+      merge-identity:
+        description: >-
+          PLACEHOLDER(merger-app). Reserved; only `github-token` is accepted
+          until the merger-App design (dot-notes plans/pocock-brakes-w2-1b-merger-app.md)
+          says otherwise.
+        type: string
+        default: github-token
+    outputs:
+      passed:
+        description: Whether the gate passed ("true" or "false")
+        value: ${{ jobs.evaluate.outputs.pass }}
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+jobs:
+  evaluate:
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'needs-human-review') &&
+      (github.event.action != 'synchronize' ||
+       github.event.sender.login == 'dependabot[bot]')
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pass: ${{ steps.gate.outputs.pass }}
+      result: ${{ steps.gate.outputs.result }}
+    steps:
+      # The ref decides which scripts run with this job's token. A branch or tag
+      # moves; a commit SHA does not. Refuse anything but a full lowercase SHA.
+      - name: Require scripts-ref to be a full commit SHA
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SCRIPTS_REF: ${{ inputs.scripts-ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCRIPTS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::scripts-ref must be a 40-character lowercase commit SHA of de-otio/.github (a branch or tag moves under the caller). Pin the caller to the same SHA as the workflow ref."
+            exit 1
+          fi
+
+      - name: Refuse an unsupported merge identity (placeholder)
+        timeout-minutes: 1
+        env:
+          MERGE_IDENTITY: ${{ inputs.merge-identity }}
+        run: |
+          set -euo pipefail
+          if [ "$MERGE_IDENTITY" != "github-token" ]; then
+            echo "::error::merge-identity '$MERGE_IDENTITY' is not supported yet (placeholder for the merger App; see the workflow header)."
+            exit 1
+          fi
+
+      # The gate's own scripts, from the org repo, never from the PR or the
+      # caller repo. `scripts-ref` is chosen by the caller's workflow file.
+      - name: Check out the gate scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: de-otio/.github
+          ref: ${{ inputs.scripts-ref }}
+          sparse-checkout: dependabot/scripts
+          persist-credentials: false
+
+      # v3 is the first major whose runs.using is node24; v2 is still node20.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Supply-chain flags: npm only. The script is the org repo's copy and
+      # reads the two lockfiles as JSON data. A script that fails is itself a
+      # flag (fail closed). Other ecosystems have no flags to raise.
+      - name: Supply-chain flags
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ECOSYSTEMS: ${{ inputs.ecosystems }}
+        run: |
+          set -euo pipefail
+          case ",$ECOSYSTEMS," in
+            *,npm,*) ;;
+            *)
+              echo '{"flags":[]}' > "$RUNNER_TEMP/flags.json"
+              echo "npm is not an enabled ecosystem; no supply-chain flags raised"
+              exit 0
+              ;;
+          esac
+          # Compare against the merge base, not the tip: a PR that is behind
+          # the base would otherwise show the base's own newer changes as diff.
+          MERGE_BASE=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq .merge_base_commit.sha)
+          fetch_lock() {
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/$REPO/contents/package-lock.json?ref=$1" > "$2"
+          }
+          if fetch_lock "$MERGE_BASE" "$RUNNER_TEMP/base-lock.json" &&
+             fetch_lock "$HEAD_SHA" "$RUNNER_TEMP/head-lock.json" &&
+             node dependabot/scripts/supply-chain/flags.mjs "$RUNNER_TEMP/base-lock.json" "$RUNNER_TEMP/head-lock.json" > "$RUNNER_TEMP/flags.json"; then
+            :
+          else
+            echo '{"flags":[{"package":"(supply-chain check)","reason":"flags-script-failed"}]}' > "$RUNNER_TEMP/flags.json"
+          fi
+
+      - name: Evaluate the gate
+        id: gate
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          ECOSYSTEMS: ${{ inputs.ecosystems }}
+        run: |
+          set -euo pipefail
+          node dependabot/scripts/dependabot-gate/gate.mjs \
+            --repo "$REPO" --pr "$PR_NUMBER" --expected-head "$HEAD_SHA" \
+            --update-type "$UPDATE_TYPE" --flags-file "$RUNNER_TEMP/flags.json" \
+            --ecosystems "$ECOSYSTEMS" \
+            > "$RUNNER_TEMP/gate.json"
+          {
+            echo "pass=$(jq -r .pass "$RUNNER_TEMP/gate.json")"
+            echo "result=$(jq -c . "$RUNNER_TEMP/gate.json")"
+          } >> "$GITHUB_OUTPUT"
+          jq -r '.reasons[]' "$RUNNER_TEMP/gate.json" | sed 's/^/gate: /' || true
+
+  # Gate failed (or could not run): label, explain once, make sure auto-merge is
+  # off. No checkout, no PR code. `contents: write` is what GitHub requires to
+  # toggle auto-merge with GITHUB_TOKEN.
+  flag:
+    needs: evaluate
+    # always(): an evaluate job that ERRORED must still switch auto-merge off.
+    #   - evaluate ran (success or failure) and did not pass;
+    #   - evaluate was skipped because someone other than Dependabot pushed to a
+    #     Dependabot PR: auto-merge goes off at once, unevaluated.
+    if: >-
+      ${{ always() && (
+      (contains(fromJSON('["success","failure"]'), needs.evaluate.result) &&
+       needs.evaluate.outputs.pass != 'true') ||
+      (github.event.action == 'synchronize' &&
+       github.event.pull_request.user.login == 'dependabot[bot]' &&
+       github.event.sender.login != 'dependabot[bot]')) }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+      RESULT: ${{ needs.evaluate.outputs.result }}
+      SENDER: ${{ github.event.sender.login }}
+    steps:
+      - name: Turn auto-merge off if it is on
+        run: |
+          set -euo pipefail
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
+
+      # No RESULT means the gate itself errored: auto-merge is off and the run is
+      # red, but a transient error is not a reason to put a sticky label on the PR.
+      # The labels `needs-human-review` and `major-bump` must already exist.
+      - name: Explain and label
+        if: ${{ needs.evaluate.outputs.result != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$(jq -r .alreadyLabeled <<<"$RESULT")" != "true" ]; then
+            {
+              echo "Not merging unattended: the merge gate did not pass."
+              echo
+              jq -r '.reasons[] | "- " + .' <<<"$RESULT"
+              echo
+              echo "Review and merge by hand, or close the PR so Dependabot regenerates it."
+            } | gh pr comment "$PR_URL" --body-file -
+          fi
+          gh pr edit "$PR_URL" --add-label needs-human-review
+          if [ "$(jq -r .updateType <<<"$RESULT")" = "version-update:semver-major" ]; then
+            gh pr edit "$PR_URL" --add-label major-bump
+          fi
+
+      # The skipped-evaluate path: a push by someone other than Dependabot.
+      - name: Explain and label (pushed by someone other than Dependabot)
+        if: ${{ needs.evaluate.result == 'skipped' }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh pr view "$PR_URL" --json labels --jq '[.labels[].name] | index("needs-human-review") != null')" != "true" ]; then
+            printf '%s\n' \
+              "Not merging unattended: pushed by $SENDER, not Dependabot." \
+              "" \
+              "Review and merge by hand. To refresh a Dependabot PR, comment \`@dependabot rebase\` rather than using the Update branch button." |
+              gh pr comment "$PR_URL" --body-file -
+          fi
+          gh pr edit "$PR_URL" --add-label needs-human-review
+
+  # Legacy per-repo merge path (off by default). Gate passed: enable GitHub
+  # auto-merge with GITHUB_TOKEN. This is the ONLY job that could hold a merge
+  # identity; see PLACEHOLDER(merger-app) in the header.
+  merge:
+    needs: evaluate
+    if: ${{ inputs.enable-auto-merge && needs.evaluate.outputs.pass == 'true' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # `--match-head-commit` only makes THIS request fail if the head already
+      # moved past the evaluated commit. What stops a later push is the
+      # `synchronize` run: a push by anyone other than Dependabot skips
+      # `evaluate` and goes straight to `flag`, which turns auto-merge off.
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
