@@ -100,7 +100,7 @@ jobs:
       # ──────────────────────────────────────────────────────────────────────
       - name: Setup Node (for npm audit signatures)
         if: steps.meta.outputs.package-ecosystem == 'npm_and_yarn'
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
