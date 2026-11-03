@@ -35,13 +35,13 @@
 #     supply-chain:
 #       permissions:
 #         contents: read
-#       uses: de-otio/.github/.github/workflows/supply-chain-npm.yml@main
+#       uses: de-otio/.github/.github/workflows/supply-chain-npm.yml@<SHA>
 #       with:
-#         scripts-ref: main
+#         scripts-ref: <SHA>   # the same 40-character SHA; the first step fails on anything else
 #
-# RUNNER: `vars.CI_RUNNER` for PRIVATE repos only, else ubuntu-latest. This runs
-# on `pull_request`, including fork PRs on public repos; the guard keeps those off
-# the self-hosted runner.
+# RUNNER: `vars.CI_RUNNER` for PRIVATE repos only, and never for a Dependabot
+# branch (decision D11), else ubuntu-latest. This runs on `pull_request`, including
+# fork PRs on public repos; the guard keeps those off the self-hosted runner.
 # =============================================================================
 
 name: Supply chain checks, npm (reusable)
@@ -51,10 +51,11 @@ on:
     inputs:
       scripts-ref:
         description: >-
-          Ref of de-otio/.github the check scripts are checked out from. Keep it
-          equal to the ref the workflow itself is pinned to (a SHA, once merged).
+          REQUIRED. Full 40-character commit SHA of de-otio/.github the check scripts are
+          checked out from; anything else fails the first step. Use the same SHA the workflow
+          itself is pinned to (`uses: ...@<SHA>`), so workflow and scripts move together.
         type: string
-        default: main
+        required: true
       node-version:
         description: Node.js version for `npm ci` and `npm audit signatures`
         type: string
@@ -65,7 +66,7 @@ permissions: {}
 jobs:
   supply-chain:
     name: supply-chain
-    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -74,6 +75,20 @@ jobs:
       # `npm audit signatures` cannot be pointed elsewhere by a file in the PR.
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
     steps:
+      # The ref decides which scripts run with this job's token. A branch or tag
+      # moves; a commit SHA does not. Refuse anything but a full lowercase SHA.
+      - name: Require scripts-ref to be a full commit SHA
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SCRIPTS_REF: ${{ inputs.scripts-ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCRIPTS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::scripts-ref must be a 40-character lowercase commit SHA of de-otio/.github (a branch or tag moves under the caller). Pin the caller to the same SHA as the workflow ref."
+            exit 1
+          fi
+
       # The caller's code under test. Depth 2 so HEAD^1 (the base tip, on
       # pull_request and merge_group) exists for the lockfile comparison.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

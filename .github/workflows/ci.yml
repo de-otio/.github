@@ -42,6 +42,32 @@ jobs:
               print(f"ok: {f}")
           ' $(git ls-files '*.yml' '*.yaml')
 
+  # The gate's own tests (pure node:test, no dependencies). Every gate regression
+  # reaches 15 repos, so nothing merges here without them. The glob is explicit:
+  # Node 22 does not accept a directory argument to `--test`.
+  gate-tests:
+    name: Gate tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Run the gate and supply-chain tests
+        run: node --test dependabot/tests/*.test.mjs
+
   # ===========================================================================
   # The `ci-required` aggregating job — see dot-work's
   # scripts/ci-required-template.yml for the six rules. In short: it keeps the
@@ -58,6 +84,7 @@ jobs:
     if: always()
     needs:
       - validate-yaml
+      - gate-tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -67,6 +94,7 @@ jobs:
         env:
           RESULTS: >-
             validate-yaml=${{ needs.validate-yaml.result }}
+            gate-tests=${{ needs.gate-tests.result }}
         run: |
           set -euo pipefail
           echo "results: $RESULTS"

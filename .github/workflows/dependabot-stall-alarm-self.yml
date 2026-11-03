@@ -22,6 +22,6 @@ jobs:
       pull-requests: read
     uses: ./.github/workflows/dependabot-stall-alarm.yml
     with:
-      scripts-ref: main
+      scripts-ref: ${{ github.sha }}
     secrets:
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}

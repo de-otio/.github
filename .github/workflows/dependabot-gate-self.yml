@@ -12,9 +12,11 @@ on:
 permissions: {}
 
 # Per PR number, not github.ref (for pull_request_target, ref is the base branch).
-# No cancel-in-progress. Keep this block in the CALLER only.
+# A `labeled` event for any other label skips every job, so it gets its own group
+# (run id) and cannot cancel a pending `synchronize` run. No cancel-in-progress.
+# Keep this block in the CALLER only.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'needs-human-review') && github.run_id || 'gate' }}
   cancel-in-progress: false
 
 jobs:
@@ -26,7 +28,9 @@ jobs:
     uses: ./.github/workflows/dependabot-gate.yml
     with:
       ecosystems: github-actions
-      scripts-ref: main
+      # This repo calls its own workflow by path, so the scripts come from the same
+      # commit the workflow runs from (the base-branch tip under pull_request_target).
+      scripts-ref: ${{ github.sha }}
       enable-auto-merge: false
       # PLACEHOLDER(merger-app): leave as is until the merger App design lands.
       merge-identity: github-token

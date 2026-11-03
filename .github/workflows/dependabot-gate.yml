@@ -54,8 +54,12 @@
 #     pull_request_target:
 #       types: [opened, reopened, synchronize, labeled]
 #   permissions: {}
+#   # GitHub keeps ONE pending run per group and a newer pending run cancels the
+#   # older one. A `labeled` event for any other label skips every job here, so it
+#   # gets its own group (run id): it can neither cancel a pending `synchronize`
+#   # run (whose decision would be lost) nor be cancelled by one.
 #   concurrency:
-#     group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+#     group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'needs-human-review') && github.run_id || 'gate' }}
 #     cancel-in-progress: false
 #   jobs:
 #     gate:
@@ -63,17 +67,23 @@
 #       permissions:
 #         contents: write
 #         pull-requests: write
-#       uses: de-otio/.github/.github/workflows/dependabot-gate.yml@main
+#       uses: de-otio/.github/.github/workflows/dependabot-gate.yml@<SHA>
 #       with:
 #         ecosystems: npm,github-actions
-#         scripts-ref: main
+#         scripts-ref: <SHA>   # the same 40-character SHA; the first step fails on anything else
 #
 # Owner prerequisites per repo: labels `needs-human-review` and `major-bump`
 # exist (this workflow has no `issues: write` and cannot create them).
 #
-# RUNNER: every job runs on `vars.CI_RUNNER` for PRIVATE repos only, else
-# ubuntu-latest. A public repo (including a fork PR on one) can never reach the
-# self-hosted runner. The runner needs `gh`, `jq` and Node 22+.
+# RUNNER: every job runs on `vars.CI_RUNNER` for PRIVATE repos only, and never for
+# a Dependabot branch (`dependabot/...` head ref), else ubuntu-latest. A public repo
+# (including a fork PR on one) can never reach the self-hosted runner, and a
+# Dependabot PR in a private repo never does either (decision D11). The runner
+# needs `gh`, `jq` and Node 22+.
+#
+# uv: a `uv.lock` change always fails the gate (`supply-chain: uv.lock
+# (uv-lockfile-unchecked)`), so the PR is labelled `needs-human-review`. There is no
+# uv supply-chain check yet; until one exists, uv bumps fail closed to a human.
 # =============================================================================
 
 name: Dependabot merge gate (reusable)
@@ -83,17 +93,18 @@ on:
     inputs:
       ecosystems:
         description: >-
-          Comma-separated ecosystems rule 3 accepts: npm, uv, github-actions.
+          Comma-separated ecosystems rule 3 accepts: npm, uv, github-actions. A `uv.lock` change always needs a human (no uv supply-chain check yet).
           Must match the package-ecosystem entries of the repo's dependabot.yml.
           `npm` also turns on the supply-chain flag check (needs a root package-lock.json).
         type: string
         default: npm,github-actions
       scripts-ref:
         description: >-
-          Ref of de-otio/.github the gate scripts are checked out from. Keep it
-          equal to the ref the workflow itself is pinned to (a SHA, once merged).
+          REQUIRED. Full 40-character commit SHA of de-otio/.github the gate scripts are
+          checked out from; anything else fails the first step. Use the same SHA the workflow
+          itself is pinned to (`uses: ...@<SHA>`), so workflow and scripts move together.
         type: string
-        default: main
+        required: true
       enable-auto-merge:
         description: >-
           Legacy: after a pass, enable GitHub auto-merge (squash) with GITHUB_TOKEN.
@@ -117,7 +128,7 @@ permissions: {}
 
 jobs:
   evaluate:
-    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
@@ -132,6 +143,20 @@ jobs:
       pass: ${{ steps.gate.outputs.pass }}
       result: ${{ steps.gate.outputs.result }}
     steps:
+      # The ref decides which scripts run with this job's token. A branch or tag
+      # moves; a commit SHA does not. Refuse anything but a full lowercase SHA.
+      - name: Require scripts-ref to be a full commit SHA
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SCRIPTS_REF: ${{ inputs.scripts-ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCRIPTS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::scripts-ref must be a 40-character lowercase commit SHA of de-otio/.github (a branch or tag moves under the caller). Pin the caller to the same SHA as the workflow ref."
+            exit 1
+          fi
+
       - name: Refuse an unsupported merge identity (placeholder)
         timeout-minutes: 1
         env:
@@ -235,7 +260,7 @@ jobs:
       (github.event.action == 'synchronize' &&
        github.event.pull_request.user.login == 'dependabot[bot]' &&
        github.event.sender.login != 'dependabot[bot]')) }}
-    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
@@ -295,7 +320,7 @@ jobs:
   merge:
     needs: evaluate
     if: ${{ inputs.enable-auto-merge && needs.evaluate.outputs.pass == 'true' }}
-    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write

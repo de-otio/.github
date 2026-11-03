@@ -33,6 +33,7 @@
 //   4. Required checks green: left to GitHub (see above).
 //   5. No `needs-human-review` label.
 //   +  Any supply-chain flag from `dependabot/scripts/supply-chain/flags.mjs` (npm only).
+//   +  uv: a `uv.lock` change always fails (no uv supply-chain check exists yet).
 
 export const BOT_LOGIN = "dependabot[bot]";
 // Real Dependabot commits (verified read-only on merged PRs, 2026-11-02): author
@@ -230,6 +231,18 @@ export function evaluate(input) {
         if (!r.ok) reasons.push(`rule 3: ${f.filename}: ${r.why}`);
       }
     }
+  }
+
+  // uv: nothing checks uv.lock the way flags.mjs and registry-host.mjs check an npm
+  // lockfile (new packages, sdists that run build code, a non-PyPI index all pass
+  // unseen). Until a uv supply-chain check exists, any uv.lock change fails closed
+  // to a human: the failure labels the PR `needs-human-review`.
+  if (
+    ecosystems.includes("uv") &&
+    Array.isArray(files) &&
+    files.some((f) => f?.filename === "uv.lock" || String(f?.filename).endsWith("/uv.lock"))
+  ) {
+    reasons.push("supply-chain: uv.lock (uv-lockfile-unchecked)");
   }
 
   // Rule 5: a human (or the gate itself, earlier) asked for review.

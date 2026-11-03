@@ -33,13 +33,14 @@
 #       permissions:
 #         contents: read
 #         pull-requests: read
-#       uses: de-otio/.github/.github/workflows/dependabot-stall-alarm.yml@main
+#       uses: de-otio/.github/.github/workflows/dependabot-stall-alarm.yml@<SHA>
 #       with:
-#         scripts-ref: main
+#         scripts-ref: <SHA>   # the same 40-character SHA; the first step fails on anything else
 #       secrets:
 #         NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
 #
-# RUNNER: `vars.CI_RUNNER` for PRIVATE repos only, else ubuntu-latest, so a
+# RUNNER: `vars.CI_RUNNER` for PRIVATE repos only, and never for a Dependabot
+# branch (decision D11; a schedule run has no head ref), else ubuntu-latest, so a
 # public repo can never reach the self-hosted runner. If the schedule payload
 # carries no `repository` the expression falls back to ubuntu-latest (safe
 # direction). The runner needs `gh` and Node 22+.
@@ -52,10 +53,11 @@ on:
     inputs:
       scripts-ref:
         description: >-
-          Ref of de-otio/.github the alarm scripts are checked out from. Keep it
-          equal to the ref the workflow itself is pinned to (a SHA, once merged).
+          REQUIRED. Full 40-character commit SHA of de-otio/.github the alarm scripts are
+          checked out from; anything else fails the first step. Use the same SHA the workflow
+          itself is pinned to (`uses: ...@<SHA>`), so workflow and scripts move together.
         type: string
-        default: main
+        required: true
     secrets:
       NTFY_TOPIC:
         description: "The ntfy.sh topic name to notify (a secret: ntfy topics are unauthenticated)."
@@ -66,12 +68,26 @@ permissions: {}
 jobs:
   alarm:
     name: Check for stalled Dependabot PRs
-    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.private && !startsWith(github.head_ref, 'dependabot/') && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
     steps:
+      # The ref decides which scripts run with this job's token. A branch or tag
+      # moves; a commit SHA does not. Refuse anything but a full lowercase SHA.
+      - name: Require scripts-ref to be a full commit SHA
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SCRIPTS_REF: ${{ inputs.scripts-ref }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SCRIPTS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::scripts-ref must be a 40-character lowercase commit SHA of de-otio/.github (a branch or tag moves under the caller). Pin the caller to the same SHA as the workflow ref."
+            exit 1
+          fi
+
       - name: Check out the alarm scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
