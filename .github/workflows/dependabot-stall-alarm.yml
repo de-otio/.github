@@ -1,0 +1,102 @@
+# =============================================================================
+# Reusable workflow: Dependabot stall alarm
+# =============================================================================
+# Generalised from de-otio/trellis `dependabot-stall-alarm.yml` (commit 2a9304d).
+# Plan: dot-notes plans/pocock-brakes-and-dependabot-2026-11.md (W1). DRAFT.
+#
+# Notifies (ntfy) when a Dependabot PR has been open for more than 7 days, or
+# has had auto-merge enabled for more than 48 hours. A blocked auto-merge, a
+# regressed bypass, a renamed required check and a merger that is not running
+# all look the same from outside: the PR just waits. Age is the cheap symptom.
+#
+# Selection logic is a pure function (dependabot/scripts/dependabot-stall/
+# select-stalled.mjs); run.mjs posts one notification per run, none when
+# nothing is stalled.
+#
+# The secret `NTFY_TOPIC` is required. With it unset the job fails on purpose,
+# so a silent alarm shows up as a red run. Provide it per repo, or as an org
+# secret shared with the repos that call this workflow (owner decision).
+#
+# CALLER (schedule triggers must live in the caller):
+#
+#   name: Dependabot stall alarm
+#   on:
+#     schedule:
+#       - cron: "17 6 * * *"   # stagger the minute per repo
+#     workflow_dispatch:
+#   permissions: {}
+#   concurrency:
+#     group: dependabot-stall-alarm
+#     cancel-in-progress: false
+#   jobs:
+#     alarm:
+#       permissions:
+#         contents: read
+#         pull-requests: read
+#       uses: de-otio/.github/.github/workflows/dependabot-stall-alarm.yml@main
+#       with:
+#         scripts-ref: main
+#       secrets:
+#         NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+#
+# RUNNER: `vars.CI_RUNNER` for PRIVATE repos only, else ubuntu-latest, so a
+# public repo can never reach the self-hosted runner. If the schedule payload
+# carries no `repository` the expression falls back to ubuntu-latest (safe
+# direction). The runner needs `gh` and Node 22+.
+# =============================================================================
+
+name: Dependabot stall alarm (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      scripts-ref:
+        description: >-
+          Ref of de-otio/.github the alarm scripts are checked out from. Keep it
+          equal to the ref the workflow itself is pinned to (a SHA, once merged).
+        type: string
+        default: main
+    secrets:
+      NTFY_TOPIC:
+        description: "The ntfy.sh topic name to notify (a secret: ntfy topics are unauthenticated)."
+        required: true
+
+permissions: {}
+
+jobs:
+  alarm:
+    name: Check for stalled Dependabot PRs
+    runs-on: ${{ (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out the alarm scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: de-otio/.github
+          ref: ${{ inputs.scripts-ref }}
+          sparse-checkout: dependabot/scripts
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: List open PRs
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: >
+          gh pr list --repo "$REPO" --state open --limit 500
+          --json number,title,url,createdAt,isDraft,state,author,autoMergeRequest
+          > "$RUNNER_TEMP/open-prs.json"
+
+      - name: Notify on stalled Dependabot PRs
+        timeout-minutes: 2
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: node dependabot/scripts/dependabot-stall/run.mjs "$RUNNER_TEMP/open-prs.json"

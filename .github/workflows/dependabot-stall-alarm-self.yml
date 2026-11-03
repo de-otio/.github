@@ -1,0 +1,27 @@
+# Thin caller for the org's reusable Dependabot stall alarm.
+# DRAFT (brakes rollout, decision D7).
+# Owner setup: the secret NTFY_TOPIC must be available to this repo (repo or org secret).
+name: Dependabot stall alarm (this repo)
+
+on:
+  schedule:
+    # Daily; the minute differs per repo to dodge scheduler congestion.
+    - cron: "07 6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dependabot-stall-alarm
+  cancel-in-progress: false
+
+jobs:
+  alarm:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/dependabot-stall-alarm.yml
+    with:
+      scripts-ref: main
+    secrets:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
