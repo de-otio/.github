@@ -26,7 +26,7 @@ jobs:
     # The default is 360 minutes (six hours). This job is seconds.
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Parse every YAML file
         run: |
